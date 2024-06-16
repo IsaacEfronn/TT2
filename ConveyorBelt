@@ -1,0 +1,144 @@
+#include <16F877A.h>
+//#device ADC=10
+#FUSES NOWDT                    //No Watch Dog Timer
+#FUSES NOBROWNOUT               //No brownout reset
+#FUSES LVP                    //Yes low voltage prgming, B3(PIC16) or B5(PIC18) used for I/O
+#use delay(crystal=20MHz)
+//---Set Ports
+//#BYTE PORTA = 5 //Extra GPIOs
+#BYTE PORTB = 6 // Extra GPIOs (39 = RB6 = PGC / 40 = RB7 = PGD)
+#BYTE PORTC = 7 //BCD CI´s
+#BYTE PORTD = 8 //Miscelaneous outputs
+#BYTE PORTE = 9 //Sensor and switches inputs
+//---Configure ports
+//#USE FAST_IO(A)
+#USE FAST_IO(B)
+#USE FAST_IO(C)
+#USE FAST_IO(D)
+#USE FAST_IO(E)
+//---Declare variables and arrays
+const byte BCD_N[10]={0b0000, 0b0001, 0b0010, 0b0011, 0b0100, 0b0101, 0b0110, 0b0111, 0b1000, 0b1001}; //Array for BCD numbers 0-9
+int objects;
+int aux;
+//---Auxiliary functions
+void PortC_Ctrl(int Obj_Counter); //Function to control port B
+//---Main functions
+void main()
+{  
+   //---Set ports A,B,C,D,E pins as INPUT or OUTPUTS
+   //set_tris_a(0b00000000); //Free port
+   SET_TRIS_B(0b11000000); // Level Shifter (HV1 coms with robot)
+   SET_TRIS_C(0b00000000); // Displays control port
+   SET_TRIS_D(0b00000000); // Miscelaneous control port
+   SET_TRIS_E(0b111); //Sensor and switches control port
+   //---Configure initial actuators value as LOW
+   for(int k = 0; k <= 7; k++){
+      BIT_CLEAR(PORTD,k);
+      delay_us(100);
+   }
+   BIT_CLEAR(PORTB,0); //---Do not send robot pulse while CB initializing
+   OUTPUT_C(0xFF); //Turn off displays (Negative Logic)
+   objects = 0; //Set counter as 0
+   delay_ms(10);
+   while(TRUE)
+   {
+      if(BIT_TEST(PORTE,2) == 0){ //Turn on the whole system (PULL UP RESISTOR);
+         //LED that indicate the system has been turned on
+         BIT_SET(PORTD,3); //NO Reset NE555 (Turn on conveyor belt)
+         BIT_SET(PORTD,4); //Turn on green LED
+         BIT_CLEAR(PORTD,5); //Turn off red LED
+         //---Call PortC Controller fuction (Modify current number in displays)
+         PortC_Ctrl(objects); 
+         delay_ms(1);
+         if(BIT_TEST(PORTE,1) == 0){ //Conveyor belt rotating clockwise (PULL UP RESISTOR)
+            BIT_SET(PORTD,6); //Turn on orange LED
+            BIT_CLEAR(PORTD,7); //Turn off yellow LED
+            BIT_SET(PORTD,0); //Enable L293D IN1
+            BIT_CLEAR(PORTD,1); //Disable L293D IN2
+            delay_ms(5);
+         }
+         else{ //Conveyor belt rotating counter-clockwise
+            BIT_CLEAR(PORTD,0); //Disable L293D IN1
+            BIT_SET(PORTD,1); //Enable L293D IN2
+            BIT_CLEAR(PORTD,6); //Turn off orange LED
+            BIT_SET(PORTD,7); //Turn on yellow LED
+            delay_ms(5);
+         }
+         //---IR-Sensor routine
+         if(objects == 99){
+            //---Turn off the conveyor
+            BIT_CLEAR(PORTD,3); //Disable L293D EN1
+            BIT_CLEAR(PORTD,0); //Disable L293D IN1
+            BIT_CLEAR(PORTD,1); //Disable L293D IN2
+            //---Set buzzer continously high
+            BIT_SET(PORTD,2);
+            //---Blik "99" on displays
+            PortC_Ctrl(objects); //Call PortB_Ctrl function **************************
+            delay_ms(100);
+            OUTPUT_C(0xFF);//Turn off displays (negative logic, remember)
+            delay_ms(100);
+         }
+         else{
+            if(BIT_TEST(PORTE,0) == 0){//If Sensor detetcs object, increase objects++ variable (NEGATIVE_LOGIC)
+               //---Increase counter +1
+               objects = objects+1;
+               //---Call PortC Controller fuction (Modify current number in displays)
+               PortC_Ctrl(objects);
+               delay_ms(1);
+               //---Beep buzzer
+               BIT_SET(PORTD,2); //Set buzzer high
+               delay_ms(100);
+               BIT_CLEAR(PORTD,2); //Set buzzer low
+               //---Send HIGH PULSE to activate robot pick and place routine
+               BIT_SET(PORTB,0); //Level Shifter HV1
+               //---Pause conveyor belt so robot can lift object
+               BIT_CLEAR(PORTD,4); //Turn off green LED
+               BIT_CLEAR(PORTD,6); //Turn off orange LED
+               BIT_CLEAR(PORTD,7); //Turn off yellow LED
+               //---Set aux as 1 to force while loop
+               aux = 1;
+               delay_ms(1);
+               while(aux > 0){
+                  BIT_CLEAR(PORTD,3); //Disable L293D EN1
+                  //---Blink Red LED
+                  BIT_SET(PORTD,5);
+                  delay_ms(500);
+                  BIT_CLEAR(PORTD, 5);
+                  delay_ms(500);
+                  //When object is gone, continue process
+                  if(BIT_TEST(PORTE,0) == 1){ 
+                     BIT_CLEAR(PORTB, 0);
+                     aux = 0;
+                  }
+               }
+            }
+            delay_ms(1);
+         }
+      }
+      //Disable all actions ("Turn off the system")
+      else{
+         BIT_CLEAR(PORTD,0); //Disable L293D IN1
+         BIT_CLEAR(PORTD,1); //Disable L293D IN2
+         BIT_CLEAR(PORTD,2); //Turn off buzzer
+         BIT_CLEAR(PORTD,3); //Turn off NE555
+         BIT_CLEAR(PORTD,4); //Turn off green LED
+         BIT_SET(PORTD,5); //Turn ON red LED
+         BIT_CLEAR(PORTD,6); //Turn off orange LED
+         BIT_CLEAR(PORTD,7); //Turn off yellow LED
+         OUTPUT_C(0xFF); //Turn off displays (Negative Logic)
+         delay_ms(10);
+      }
+   }
+}
+//Merge BCD bits in a single BCD variable to control whole port B
+void PortC_Ctrl(int Obj_Counter){
+   int U = 0; //Units
+   int T = 0; //Tens
+   byte Merged_bits; //Byte variable output
+   //Put apart Units and Tens from counter AKA "objects"
+   U = Obj_Counter%10;
+   T = (Obj_Counter/10)%10;
+   Merged_bits = (BCD_N[T]<<4) | BCD_N[U]; //shift bits like concatenate them: 4b + 4b = 8b
+   OUTPUT_C(Merged_bits);
+   delay_ms(10);
+}
