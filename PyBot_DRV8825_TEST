@@ -1,0 +1,107 @@
+//Test code for Robot System (motors and pump control)
+//Vref = 0.85 V -> Imax = Inom = 1.7 A / phase -> Rref = 0.1 Ohm
+//Eight-Step -> Step_out = (th * Step_total) / (360 * uStepping) | Step_total depends on shoulder (900) or elbow (1456.06)
+
+//Include servo librarie
+#include <Servo.h>
+
+//Define driver (DRV8825) control pins
+#define M2 A4 //M0 = HIGH (PCB design) / M1 = HIGH (PCB design) / M2 = LOW (ArdCtrl) -> Eight - Step
+#define Enable 11
+//Motor 1 Control pins(LIFT)
+#define step_Lift 5
+#define dir_Lift 6
+//Motor 2 Control pins(Shoulder)
+#define step_Shoulder 9
+#define dir_Shoulder 10
+//Motor 3 Control pins(Elbow)
+#define step_Elbow 7
+#define dir_Elbow 8
+//Pump Relay module
+#define pump_relay 3
+
+//Define onBoard LED´s
+#define RED_LED A2
+#define BLUE_LED A1
+
+//Create servo object for valve 
+Servo valve;
+
+//Set delay time between actions mSec
+int arb_delay = 500;
+
+//Function prototype
+   //step_F(true = clockwise, #steps(Step_Total = 360 deg), dir_joint, step_joint, pulse On/Off[microseconds]);
+void step_F(bool rot_dir, int steps, int dir_joint, int step_joint, int t_pulse);
+
+void setup() {
+  //Set LED´s pins as outputs
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+  //Set up Enable & M2 as LOW
+  pinMode(Enable,OUTPUT);
+  digitalWrite(Enable, LOW);
+  pinMode(M2,OUTPUT);
+  digitalWrite(M2, LOW);
+  //Set ctrl Lift pins
+  pinMode(step_Lift,OUTPUT);
+  pinMode(dir_Lift,OUTPUT);
+  //Set ctrl Shoulder pins
+  pinMode(step_Shoulder,OUTPUT);
+  pinMode(dir_Shoulder,OUTPUT);
+  //Set ctrl Elbow pins
+  pinMode(step_Elbow,OUTPUT);
+  pinMode(dir_Elbow,OUTPUT);
+  //Set ctrl pump relay pin
+  pinMode(pump_relay, OUTPUT);
+  digitalWrite(pump_relay, LOW);
+  //Attach servo object to their control pin 
+  valve.attach(4);
+  pinMode(4, OUTPUT);
+}
+
+void loop() {
+  //Move "Lift" 1 rotation clockwise
+  step_F(true, 200, dir_Lift, step_Lift, arb_delay);
+  //Move "Lift" 1 rotation counterclockwise
+  step_F(false, 200, dir_Lift, step_Lift, arb_delay);
+  //Suck
+  digitalWrite(pump_relay,HIGH);
+  valve.write(0);
+  delay(1000);
+  //Maintain suck
+  digitalWrite(pump_relay, LOW);
+  valve.write(0);
+  delay(10);
+  
+  //Move "Shoulder" 1 rotation clockwise
+  step_F(true, 200, dir_Shoulder, step_Shoulder, arb_delay);
+  //Move "Shoulder" 1 rotation counterclockwise
+  step_F(false, 200, dir_Shoulder, step_Shoulder, arb_delay);
+  //Move "Elbow" 1 rotation clockwise
+  step_F(true, 200, dir_Elbow, step_Elbow, arb_delay);
+  //Move "Shoulder" 1 rotation counterclockwise
+  step_F(false, 200, dir_Elbow, step_Elbow, arb_delay);
+}
+//Step control function 
+void step_F(bool rot_dir, int steps, int dir_joint, int step_joint, int t_pulse){
+  //Turn on LED´s -> Clockwise = RED / Counterclockwise = Blue
+  if(rot_dir == true){
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(BLUE_LED, LOW);
+  }
+  else{
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(BLUE_LED, HIGH);
+  }
+  //Set "dir_joint" rotation (clockwise/counterclockwise)
+  digitalWrite(dir_joint, rot_dir);
+  //Control steps (on/off step_joint)
+  for(int i = 0; i < steps; i++){
+    digitalWrite(step_joint,HIGH);
+    delayMicroseconds(t_pulse);
+    digitalWrite(step_joint,LOW);
+    delayMicroseconds(t_pulse);
+  }
+  delay(1000);
+}
