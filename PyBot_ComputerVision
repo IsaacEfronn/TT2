@@ -1,0 +1,158 @@
+# Import all necessary libraries
+import cv2
+from picamera2 import Picamera2
+#from libcamera import controls
+import numpy as np
+from time import sleep
+
+# Set camera previous configuration
+PiCam = Picamera2()
+PiCam.configure(PiCam.create_preview_configuration(main={"format": 'XRGB8888'}))
+
+# Start camera and set continuous autofocus mode
+PiCam.start()
+#PiCam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+#NOTE: USING AUTOFOCUS AFFECTS THE IMAGE BLUR, SO DO NOT USE IT
+
+# Set function that stop running the program
+def FinishProgram():
+    # If user press 'spacebar' while code is runing, return 'False' (finish While Loop)
+    if cv2.waitKey(1) & 0xFF == ord(' '):
+        return False
+    else:
+        return True
+
+# Set function that will obtain raw image
+def getRaw():
+        raw_image = PiCam.capture_array()
+        #cv2.imshow("Raw Image", raw_image)
+        return raw_image
+
+# Set function that will convert raw image to gray scale
+def raw2gs(raw_image):
+        gray_image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2GRAY)
+        #cv2.imshow("Gray Image", gray_image)
+        return gray_image
+
+# Set function that will b lur the gray image
+def blur_filter(gray_image):
+        blurred_image = cv2.blur(gray_image,(9,9))
+        #cv2.imshow("Blurred Image", blurred_image)
+        return blurred_image
+
+# Set function that draws a grid on raw image
+def gridder(raw_image):
+    # Obtain frame size
+    height, width, chn = raw_image.shape #Size = 480 rows x 640 columns
+    # Define value of px per cell
+    pxCell = 80
+    # Draw grid on frame (vertical lines then horizontal lines)
+    for i in range(pxCell, width-pxCell, pxCell):
+        gridded_img = cv2.line(raw_image,(i,pxCell), (i,height) , (255,255,255) , 1)
+    for i in range(pxCell, height, pxCell):
+        gridded_img = cv2.line(raw_image,(0,i), (width-160,i) , (255,255,255) , 1)
+    #  Draw X axis line from 0,0 to img_width,0
+    cv2.line(gridded_img,(0,pxCell), (width-(2*pxCell),pxCell) , (0,0,255) , 5)
+    #  Draw Y axis line from 0,0 to 0,img_height
+    cv2.line(gridded_img,(0,pxCell), (0,height) , (0,255,0) , 5)
+    # Draw plane center (0,0)
+    gridded_img = cv2.circle(raw_image,(0,pxCell),10,(255,255,255),-1)
+    return gridded_img
+
+# Set function that runs Hough Circles transform
+def HoughTransform(gridded_img_HT, blr_image_HT):
+    #  Initialize x,y,r accumulators
+    x_accum = 0
+    y_accum = 0
+    r_accum = 0
+    #  Set "n" as the number of samples for each accumulator
+    n = 10
+    #  Do a first detection of circles. If detects, take n samples for each accumulator
+    #detectedCircles = cv2.HoughCircles(blr_image_HT, cv2.HOUGH_GRADIENT, 1, 240, param1 = 100, param2 = 18, minRadius = 105, maxRadius = 110)
+    #if detectedCircles is not None:
+    for i in range(0,n,1):
+        #  1,240,100,18,105,110
+        detectedCircles = cv2.HoughCircles(blr_image_HT, cv2.HOUGH_GRADIENT, 1, 240, param1 = 100, param2 = 20, minRadius = 106, maxRadius = 112)
+        if detectedCircles is not None:
+            #  Convert circle parameters to 16-bit integers (org_x, org_y, r)
+            detectedCircles = np.uint16(np.around(detectedCircles))
+            #  Fill accumulators
+            for i in detectedCircles[0,:]:
+                x_accum = x_accum + i[0]
+                y_accum = y_accum + i[1]
+                r_accum = r_accum + i[2]
+        else:
+            continue
+    #  Obtain coordinates average and return results
+    org_x = int(x_accum/n)
+    org_y = int(y_accum/n)
+    r = int(r_accum/n)
+    #else:
+        #org_x = 0
+        #org_y = 0
+        #r = 0
+    return org_x, org_y, r
+
+#  Set function that converts pixels to mm
+def px2mm(x_px, y_px):
+    #  Calculate ratio = px / mm {observed data}
+    ratio = 80/20.5
+    #  Return int results
+    cord_mm = [int(x_px / ratio), int(y_px / ratio)]
+    return cord_mm
+
+#  Set function to adjust VS coordinates to Robot coordinates
+def RobotAdjCord(VSx,VSy):
+    #  Absolut observed distance between Robot and Vision System main frames (mm)
+    DTx = 122
+    DTy = 185
+    #  Solve distance for robot TCP and return values
+    RobotCord = [-DTx+VSx, DTy - VSy]  # TCPx, TCPy
+    return RobotCord
+
+#  Set a function that draws and shows important information on display
+def picasso(gridded_img):
+    # Define value of px per cell
+    pxCell = 80
+    #  Get circles with HoughTransform fcn
+    #  First argument: grid raw image > get raw image
+    #  Second argument: Get blurred image > binarize raw image > get raw image
+    org_x, org_y, r  = HoughTransform(gridder(getRaw()), blur_filter(raw2gs(getRaw())))
+    #  If radius 106 < r < 112, there's a mazapan
+    if 104 < r < 112:
+        #  Draw boundary circle
+        cv2.circle(gridded_img, (org_x,org_y),r,(255,0,255),3)
+        #  Draw circle center dot
+        cv2.circle(gridded_img, (org_x,org_y),5,(0,0,0),-1)
+        # Draw distance from Origin to X_org
+        cv2.line(gridded_img,(0,org_y), (org_x,org_y) , (0,0,255) , 2)
+        # Draw distance from Origin to Y_org
+        cv2.line(gridded_img,(org_x,pxCell), (org_x,org_y) , (0,255,0) , 2)
+        # Convert pos coordinates to mm and adj for robot
+        VS_cord_mm = px2mm(org_x,org_y)
+        Rob_cord_mm = RobotAdjCord(VS_cord_mm[0], VS_cord_mm[1])
+        # Print both coordinates on display
+        #maz_pos_VS = 'VS: ' + 'X=' + str(VS_cord_mm[0]) + ',' + 'Y='+ str(VS_cord_mm[1])
+        maz_pos_Rob = 'Rob: ' + 'X=' + str(Rob_cord_mm[0]) + ',' + 'Y='+ str(Rob_cord_mm[1])
+        #cv2.putText(gridded_img, maz_pos_VS, (org_x - 72, org_y + 25) , cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1, cv2.LINE_AA)
+        cv2.putText(gridded_img, maz_pos_Rob, (org_x - 92, org_y + 25) , cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2, cv2.LINE_AA)
+        # Write message when a mazapan is detected
+        cv2.putText(gridded_img, 'Mazapan detected', (95,450) , cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2, cv2.LINE_AA)
+        cv2.imshow("Circles Detected", gridded_img[pxCell:gridded_img.shape[0], 0:gridded_img.shape[1]-(2*pxCell)])
+    else:
+        #  Write message when a mazapan is not detected
+        cv2.putText(gridded_img, 'No mazapan detected', (65,450) , cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,255), 2, cv2.LINE_AA)
+        cv2.imshow("Circles Detected", gridded_img[pxCell:gridded_img.shape[0], 0:gridded_img.shape[1]-(2*pxCell)])
+# Main operation code block
+while True:
+        sleep(0.001)
+        if FinishProgram() == False:
+            break
+        else:
+            picasso(gridder(getRaw()))
+
+
+
+# End program and close windows
+PiCam.close()
+cv2.destroyAllWindows()
