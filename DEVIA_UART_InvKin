@@ -1,0 +1,133 @@
+# *** Serial comunication test with inverse kinematics for DEVIA Control board ***
+# This code send data from Raspberry to DEVIA (Solve InvKin and send steps)
+# The user input the string value for position and Raspberry send steps to DEVIA
+
+# ---Import libraries
+import serial
+from time import sleep
+import math
+
+# ---Configure serial comunication (Port and BAUD rate must match with Arduino board)
+DEVIA_ser = serial.Serial('/dev/ttyACM0', 115200, timeout=0.001)  # Open port
+sleep(2)  # Wait 2 secs for propper serial initialization
+DEVIA_ser.reset_input_buffer()  # Refresh buffer
+print('*Raspberry Pi 5 -> Serial initialized propperly...')  # Sendd confirmation message
+sleep(1)
+
+# ---Coms auxiliary functions
+# Send from Raspberry to DEVIA motor positions
+def RaspberryPi_message(steps4lift, steps4shoulder, steps4elbow, VG_en):
+    # Combine all str-pos and separate them with commas in a single str
+    final_msg = steps4lift + ',' + steps4shoulder + ',' + steps4elbow + ',' + VG_en + ','  # IMPORTANT: add one extra comma
+    # Encode and send motor position to DEVIA
+    print('*Raspberry Pi 5 -> Motors moved to: ' + final_msg)
+    DEVIA_ser.write(final_msg.encode('utf-8'))
+
+# Receive a confirmation message from DEVIA
+def DEVIA_response():
+    # Wait untill DEVIA send something back
+    while DEVIA_ser.in_waiting <= 0:
+        sleep(0.000001)
+    # Read response from DEVIA
+    response = DEVIA_ser.readline().decode('utf-8').rstrip()
+    print('*DEVIA -> ' + response)
+    sleep(0.001)
+
+# Function that use individual coms functions to execute the whole command *PRINCIPAL ROBOT FCN*
+def robot_cmd(lift_str_steps, shloulder_str_steps, elbow_str_steps, vaccum_en):
+    # Send desired steps from Raspberry to DEVIA (designed function)
+    RaspberryPi_message(lift_str_steps, shloulder_str_steps, elbow_str_steps, vaccum_en)
+    # Wait for DEVIA confirmation message "Moving motors..." (designed function)
+    DEVIA_response()
+    # Wait for DEVIA confirmation message "Motors moved succesfully!"(designed function)
+    DEVIA_response()
+    print('------------------------------------------')
+
+# ---Auxiliary calculous functions
+
+# Functions to convert mm/deg to steps
+def lift_stepizer(distance):
+    uStepping = 1  # Full-Step configuration
+    lift_mm2steps = ((distance/1000)*200*uStepping) / 0.008
+    return str(int(lift_mm2steps))
+
+def shoulder_stepizer(th_s):
+    uStepping = 4  # Quarter-Step configuration
+    shoulder_deg2steps = (th_s * 200 * uStepping * (72/16)) / 360
+    return str(int(shoulder_deg2steps))
+
+def elbow_stepizer(th_e):
+    uStepping = 4  # Quarter-Step configuration
+    elbow_deg2steps = (th_e * 200 * uStepping * (62/16) * (62/33)) / 360
+    return str(int(elbow_deg2steps))
+
+# Function to analize limits of work-space
+def limit_inspector(pos_x, pos_y, pos_z, h1, efron):
+    inspector_flag = 1
+    d1_lim = 2*h1
+    d1 = pos_z + h1
+    if (efron > 1 or efron < -1):
+        inspector_flag = 0
+    elif (d1 > d1_lim or d1 < 0):
+        inspector_flag = 0
+    elif (pos_x == 0 and pos_y > 207):
+        inspector_flag = 0
+    else:
+        inspector_flag = 1
+    return inspector_flag
+
+# Inverse kinematics function
+def inverse_kinematics(positions_str):
+    # Split string and get each position in array [x y z]
+    positions_array = positions_str.split(',')
+    X = int(positions_array[0])
+    Y = int(positions_array[1])
+    Z = int(positions_array[2])
+    VG = positions_array[3]
+    # Define link lenghts
+    L1 = 93  # From steel rod center (q1) to elbow joint bearing center (q2)
+    L2 = 125  # From elbow joint bearing center (q2) to TCP
+    h1 = 30  # From yellow base plate (top face) to black sponge mid plane
+    # Solve for angles
+    isaac = (pow(X, 2) + pow(Y, 2) - pow(L1, 2) - pow(L2, 2)) / (2*L1*L2)
+    d1 = Z + h1  # d1 is the distance that the robot need to move on Z axis to reach the desired point
+    if (limit_inspector(X,Y,Z,h1,isaac) == 1):
+        q2 = math.atan2(math.sqrt(1 - pow(isaac, 2)), isaac)
+        q1 = math.atan2(Y, X) - math.atan2(L2 * math.sin(q2), L1 + (L2 * math.cos(q2)))
+        # Convert to degrees and integers
+        q2 = math.degrees(q2) #+ error_comp(X,L1,L2)
+        q1 = math.degrees(q1)
+        # Evaluate angles
+        if ( (-115 < q2 < 115) and (-90 < q1 < 90)):
+            # Convert to steps
+            d1_steps = lift_stepizer(d1)
+            q1_steps = shoulder_stepizer(q1)
+            q2_steps = elbow_stepizer(q2)
+            # Print in Raspberry Pi console
+            print("[L1 q1 q2]: " + str(d1) + "," + str(q1) + "," + str(q2))
+            print("Steps [Lift Shoulder Elbow]: " + d1_steps + "," + q1_steps + "," + q2_steps)  # Already stringed
+            print("-----------------------------------------------------------")
+            # Send data to DEVIA
+            robot_cmd(d1_steps, q1_steps, q2_steps, VG)
+            # HOME [X Y Z] = [218, 0, 0] Z_axis offset = 40 mm
+        else:
+            print("*Raspberry Pi 5 -> ERROR: Desired TCP out of bounds")
+    else:
+        print("*Raspberry Pi 5 -> ERROR: Desired TCP out of bounds")
+
+# ---Main loop (with exception)
+try:
+    while (True):
+        sleep(0.0001)  # Healthy delay for Raspberry Pi CPU
+        # Ask user for each motor steps
+        raw_positions = input("*Raspberry Pi 5 -> Input (X,Y,Z,VG) positions in mm: ")
+        # Call inverse kinematics function (DEVIA Serial coms included)
+        inverse_kinematics(raw_positions)
+except KeyboardInterrupt:  # Press Ctrl+C to stop the code
+    # Close serial porta and stop coms
+    DEVIA_ser.close()
+    # Wait 1 sec for propper close and print farewell message
+    sleep(1)
+    print('\n')
+    print('------------------------------------------')
+    print('*Raspberry Pi 5 -> Serial closed propperly...bye,bye!')
