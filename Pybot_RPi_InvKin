@@ -1,0 +1,280 @@
+// ---Code for PyBot movement controlled via SERIAL using Raspberry Pi 5 and DEVIA Control board
+// Include libraries
+#include <AccelStepper.h>
+#include <Servo.h>
+
+//Define OnBoard LED´S
+#define BLUE_LED A1
+#define RED_LED A2
+
+//Define driver (DRV8825) control pins
+#define M2 A4 //Full-Step for Lift stepper & Quarter-Step for Arm steppers
+#define Enable_motors_pin 11
+
+//Motor 1 Control pins(LIFT)
+#define step_Lift 5
+#define dir_Lift 6
+
+//Motor 2 Control pins(Shoulder)
+#define step_Shoulder 7
+#define dir_Shoulder 8
+
+//Motor 3 Control pins(Elbow)
+#define step_Elbow 9
+#define dir_Elbow 10
+
+//Define hardware exrernal inputs
+#define EmBtn 12
+#define CB_sens 13
+
+// Create Servo object for "vaccum pump"
+Servo pump;
+
+// Create AccelStepper objects for stepper motors
+AccelStepper Lift_SM(1, step_Lift, dir_Lift); //( Driver PCB with two control pins *1*, Step Pin, Dir Pin)
+AccelStepper Shoulder_SM(1, step_Shoulder, dir_Shoulder); //( Driver PCB with two control pins *1*, Step Pin, Dir Pin)
+AccelStepper Elbow_SM(1, step_Elbow, dir_Elbow); //( Driver PCB with two control pins *1*, Step Pin, Dir Pin)
+
+// Set stepper motor target porsition variables
+short Lift_target_pos;
+short Shoulder_target_pos;
+short Elbow_target_pos;
+
+// Create auxiliar variables
+short motor_targuet_values[4]; // Int array that will contain the converted STEP positions
+short Mov_completed; // Auxiliary flag that says if that the movement has been completed
+short packing_cycle;
+short traj_cntr;
+
+// Set Max Speed and Acceleration values
+short SM_MaxSpeed_Lift= 1000; // !> 4000
+short SM_SetSpeed_Lift = 1000;
+short SM_Acceleration_Lift = 30000; // EXP
+
+short SM_MaxSpeed_Arm = 3000; // !> 4000
+short SM_SetSpeed_Arm = 3000;
+short SM_Acceleration_Arm = 10000; // EXP
+
+// Headers of auxiliary functions
+void OnBoard_LEDs(int OnLED, int OffLED);
+void OnBoard_LEDs_blinker();
+void Serial_traductor();
+void ReadRPi();
+void run_motors();
+void position_reached();
+void Motors2Zero();
+void enable_motors(bool state);
+void enable_vaccumG(short state);
+void em_stop();
+
+//---Void setup
+void setup() {
+
+  // Initialize USB Serial
+  SerialUSB.begin(115200); // Initialize serial coms
+  while (!Serial) {} // Wait until Serial (due to native USB) is ready
+
+  // Configure emergency stop pin
+  pinMode(EmBtn, INPUT);
+  pinMode(CB_sens, INPUT);
+
+
+  // Configure On-Board LED´s
+  pinMode(BLUE_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  // Configure Enable & M2 (DV8825) as LOW to get full step (Hardware modified M0 = M1 = LOW. Software Ctrl M2 = LOW )
+  pinMode(Enable_motors_pin, OUTPUT);
+  enable_motors(true); // Enable function (negative logic -> true = disabled)
+  pinMode(M2, OUTPUT);
+  digitalWrite(M2, LOW); // ALWAYS LOW, OTHERWISE DRV8825 BLOWS (Actual Vref configuration)
+
+  // Configure Servo object for "vaccum pump" and turn it off
+  pump.attach(3);
+  enable_vaccumG(0);
+
+  // Configure AccelStepper objects for stepper motors
+  // ---LIFT
+  Lift_SM.setMaxSpeed(SM_MaxSpeed_Lift);
+  Lift_SM.setAcceleration(SM_Acceleration_Lift);
+  Lift_SM.setSpeed(SM_SetSpeed_Lift); //steps per second (Normally 200 steps = 360° (in motor) in 1 sec, so 3200 = 1 turn in 0.5 sec [200*8 (uStepping) = 1600]
+
+  // ---Shoulder
+  Shoulder_SM.setMaxSpeed(SM_MaxSpeed_Arm);
+  Shoulder_SM.setAcceleration(SM_Acceleration_Arm);
+  Shoulder_SM.setSpeed(SM_SetSpeed_Arm);
+
+  // ---Elbow
+  Elbow_SM.setMaxSpeed(SM_MaxSpeed_Arm);
+  Elbow_SM.setAcceleration(SM_Acceleration_Arm);
+  Elbow_SM.setSpeed(SM_SetSpeed_Arm);
+
+  // Set flag at 1 so while start, DEVIA doesn't send wrong data
+  Mov_completed = 1;
+
+  // LED's initializing routine
+  OnBoard_LEDs_blinker();
+  OnBoard_LEDs(RED_LED, BLUE_LED);
+
+  // Set motors current position as new "zero"
+  Motors2Zero();
+}
+
+//----Void loop
+void loop() {
+
+  // Evaluate emergency stop condition
+  em_stop();
+
+  // Read incomming data from RPI
+  ReadRPi();
+
+  // Evaluate gap distance to run motors
+  run_motors();
+
+  // Evaluate gap distance to stop motors and set new zero position (move motors freely)
+  position_reached();
+}
+
+//---Onboard LED´s control function*
+void OnBoard_LEDs(int OnLED, int OffLED) {
+  digitalWrite(OnLED, HIGH); //LED on
+  digitalWrite(OffLED, LOW); //LED off
+}
+
+//---Onboard LED´s blinker function*
+void OnBoard_LEDs_blinker() {
+  // 1 sec blink routine (200 ms each cicle * 5 = 1 seg)
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(BLUE_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+    delay(100);
+    digitalWrite(BLUE_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+    delay(100);
+  }
+}
+
+//---Serial traductor function* (RPi -> DEVIA)
+void Serial_traductor() {
+  
+  // Define function local variiables
+  String Raspberry_Data; // String that will contain the string (servo positions) from RaspberryPi
+  String num_carrier = ""; // Auxiliary and temporary variable that will contain the current position readed
+  char c; // Auxiliary variable for char reading from string 'Raspberry_Data'
+  short k = 0; // Auxiliary indexer to fill array 'motor_values[3]'
+  short i; // Auxiliary indexer used in For loops
+  short str_len; // Variable that contains the lenght of string 'Raspberry_Data'
+  // motor_values[x] it's a global variable
+
+  // Read string from Raspberry & obtain it's lenght
+  Raspberry_Data = SerialUSB.readString();
+  delay(1);
+  str_len = Raspberry_Data.length();
+
+  // For loop that works as 'comma finder'
+  for (i = 0; i < str_len; i++) {
+    c = Raspberry_Data.charAt(i); // Get each char from string at indexer (i) position
+    if (c != ',') {
+      num_carrier += c; // Add to aux string each char if it isn't a comma
+    }
+    else {
+      motor_targuet_values[k] = num_carrier.toInt(); // Convert aux carrier as int value
+      k = k + 1; // Increase aux 'k' indexer
+      num_carrier = ""; // 'Reset' aux str
+    }
+  }
+}
+
+//---Run motors function*
+void run_motors() {
+
+  if ( (Lift_SM.distanceToGo() != 0) || (Shoulder_SM.distanceToGo() != 0) || (Elbow_SM.distanceToGo() != 0) ) { //If there's a gap between the current position and the final one, move the motor
+
+    Lift_SM.run();
+    Shoulder_SM.run();
+    Elbow_SM.run();
+
+    // Turn on Blue LED (indicates that robot is moving)
+    OnBoard_LEDs(BLUE_LED, RED_LED);
+  }
+}
+
+//---Motors position reached function*
+void position_reached() {
+  
+  if ( (Mov_completed == 0) && (Lift_SM.distanceToGo() == 0) && (Shoulder_SM.distanceToGo() == 0) && (Elbow_SM.distanceToGo() == 0) ) { //If there's not a gap between the current position and the final one, move the motor
+    
+    // Wait 2 ms before telling RPi that DEVIA has finished
+    delay(2);
+    
+    
+    // Set auxiliary flag as 1
+    Mov_completed = 1;
+    
+    enable_motors(true); // true = disabled  (negative logic)
+    
+    // Set default LED values
+    OnBoard_LEDs(RED_LED, BLUE_LED);
+    
+    // Send confirmation message to RPi
+    SerialUSB.print("Motors moved succesfully!");
+  }
+}
+
+//---Read incoming data from RPI
+void ReadRPi() {
+  if (SerialUSB.available() > 0) {
+
+    // Obtain incoming data from RPi
+    Serial_traductor();
+
+    // Asign targuet positions to each motor and control vaccum gripper
+    Lift_SM.moveTo(motor_targuet_values[0]);
+    Shoulder_SM.moveTo(motor_targuet_values[1]);
+    Elbow_SM.moveTo(motor_targuet_values[2]);
+    enable_vaccumG(motor_targuet_values[3]);
+    delay(1);
+
+    // Send a message to RPi5 that the motors will move
+    SerialUSB.print("Moving robot to target positions...");
+
+    // Enable motors with function through 'enable_motors_pin'
+    enable_motors(false); // false = enabled  (negative logic)
+
+    // Re-initialize flag at zero
+    Mov_completed = 0;
+  }
+}
+
+//---Set new relative 0 position function*
+void Motors2Zero() {
+  Lift_SM.setCurrentPosition(0);
+  Shoulder_SM.setCurrentPosition(0);
+  Elbow_SM.setCurrentPosition(0);
+  delay(1);
+}
+
+//---Enable motors function*
+void enable_motors(bool state) {
+  digitalWrite(Enable_motors_pin, state);
+}
+
+//---Enable vaccum gripper
+void enable_vaccumG(short state) {
+  if (state == 1) {
+    pump.write(180);
+  }
+  else {
+    pump.write(0);
+  }
+}
+
+//---Emergency Stop Button function*
+void em_stop() {
+  while (digitalRead(EmBtn) == 0) { // Pull-Up resistor
+    enable_motors(true); // true = disabled  (negative logic)
+    enable_vaccumG(0);
+    OnBoard_LEDs_blinker();
+  }
+}
